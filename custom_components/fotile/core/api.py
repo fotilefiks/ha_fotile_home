@@ -1,4 +1,5 @@
 """Fotile API client (flat REST against the HA facade)."""
+
 from __future__ import annotations
 
 import json
@@ -9,6 +10,11 @@ from typing import Any
 import aiohttp
 
 from ..const import (
+    APP_API_BASE_URL,
+    APP_API_HEADERS,
+    APP_DEVICES_PATH,
+    APP_ROUTE_PATH,
+    APP_SHADOW_PATH,
     CODE_DEVICE_OFFLINE,
     FAN_LEVEL_HIGH,
     FAN_LEVEL_STANDBY,
@@ -33,10 +39,13 @@ from .authbase import (
 )
 from .mapping import (
     find_snapshot_device,
+    map_app_device_fields,
+    map_app_shadow,
     map_device_fields,
     map_status_fields,
     to_bool,
 )
+from .mqtt import FotileMqtt
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -100,6 +109,9 @@ class FotileClient:
         self._base_url = base_url.rstrip("/")
         # thirdPartyUserId from AcceptGrant; used as the HA unique_id only.
         self._third_party_user_id: str | None = None
+        # Devices discovered through the 方太幸福家 App API when the HA facade
+        # omits their appliance family.
+        self._app_devices: dict[str, dict[str, Any]] = {}
 
     @property
     def auth(self) -> AbstractAuth:
@@ -115,6 +127,11 @@ class FotileClient:
 
     def set_third_party_user_id(self, value: str | None) -> None:
         self._third_party_user_id = value
+
+    @property
+    def app_device_count(self) -> int:
+        """Number of devices discovered through the App API fallback."""
+        return len(self._app_devices)
 
     # ---- unified request ----
 
@@ -150,9 +167,7 @@ class FotileClient:
 
             if response.status in (401, 403):
                 text = await response.text()
-                raise FotileAuthError(
-                    response.status, f"Unauthorized: {text[:200]}"
-                )
+                raise FotileAuthError(response.status, f"Unauthorized: {text[:200]}")
 
             if response.status >= 400:
                 text = await response.text()
@@ -183,6 +198,59 @@ class FotileClient:
                 200, f"Response is not a JSON object: {type(raw).__name__}"
             )
         return raw
+
+    async def _call_app_api(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+    ) -> Any:
+        """Call the 方太幸福家 App API with the same OAuth access token."""
+        if not self._third_party_user_id:
+            raise FotileAuthError(
+                401,
+                "Cannot use App API without thirdPartyUserId from AcceptGrant",
+            )
+
+        token = await self._auth.async_get_access_token()
+        headers = {
+            **APP_API_HEADERS,
+            "Access-Token": token,
+            "X-User": self._third_party_user_id,
+        }
+        url = f"{APP_API_BASE_URL}{path}"
+
+        try:
+            async with self._session.request(
+                method,
+                url,
+                json=payload,
+                headers=headers,
+            ) as response:
+                text = await response.text()
+                if response.status in (401, 403):
+                    raise FotileAuthError(
+                        response.status,
+                        f"App API unauthorized: {text[:300]}",
+                    )
+                if response.status >= 400:
+                    code, description = self._parse_error(text)
+                    raise FotileBusinessError(
+                        code,
+                        description or text[:500],
+                    )
+                try:
+                    return json.loads(text) if text else None
+                except ValueError as err:
+                    raise FotileApiError(
+                        response.status,
+                        f"App API returned invalid JSON: {text[:300]}",
+                    ) from err
+        except aiohttp.ClientError as err:
+            raise FotileConnectionError(
+                0,
+                f"App API connection error: {err}",
+            ) from err
 
     # ---- AcceptGrant ----
 
@@ -235,6 +303,32 @@ class FotileClient:
                 }
             )
 
+        if devices:
+            return devices
+
+        _LOGGER.info(
+            "Fotile HA facade returned no devices; trying the App API fallback"
+        )
+        raw_app = await self._call_app_api("GET", APP_DEVICES_PATH)
+        app_devices = raw_app.get("deviceList") if isinstance(raw_app, dict) else None
+        if not isinstance(app_devices, list):
+            _LOGGER.warning(
+                "Fotile App API returned an unexpected device list: %s",
+                raw_app,
+            )
+            return []
+
+        for raw in app_devices:
+            mapped = map_app_device_fields(raw)
+            if mapped is None:
+                continue
+            devices.append(mapped)
+            self._app_devices[mapped["device_id"]] = mapped
+
+        _LOGGER.info(
+            "Fotile App API fallback discovered %d device(s)",
+            len(self._app_devices),
+        )
         return devices
 
     # ---- device status ----
@@ -244,6 +338,10 @@ class FotileClient:
 
         Returns mapped internal fields plus online, _flat, _fetched_at.
         """
+        app_device = self._app_devices.get(str(device_id))
+        if app_device is not None:
+            return await self._get_app_device_status(app_device)
+
         resp = await self._call_proxy(f"/devices/{device_id}/snapshot")
 
         target = find_snapshot_device(resp, device_id)
@@ -258,6 +356,128 @@ class FotileClient:
         status = map_status_fields(target)
         status["_fetched_at"] = time.time()
         return status
+
+    async def _get_app_device_status(
+        self,
+        device: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Read a V6A/high-appliance snapshot through batchQueryShadow."""
+        payload = {
+            "devices": [
+                {
+                    "productId": device["product_id"],
+                    "deviceId": int(device["device_id"]),
+                }
+            ]
+        }
+        resp = await self._call_app_api("POST", APP_SHADOW_PATH, payload)
+        shadows = (
+            (resp.get("data") or {}).get("deviceShadows")
+            if isinstance(resp, dict)
+            else None
+        )
+        if not isinstance(shadows, list) or not shadows:
+            _LOGGER.warning(
+                "Fotile App API returned no shadow for device %s: %s",
+                device["device_id"],
+                resp,
+            )
+            return {
+                "online": False,
+                "_flat": {},
+                "_fetched_at": time.time(),
+            }
+
+        status = map_app_shadow(shadows[0])
+        status["_fetched_at"] = time.time()
+        return status
+
+    async def _get_app_broker(self) -> dict[str, Any]:
+        """Fetch the current App MQTT broker and client id."""
+        if not self._third_party_user_id:
+            raise FotileAuthError(401, "Missing Fotile App user id")
+        response = await self._call_app_api(
+            "POST",
+            APP_ROUTE_PATH,
+            {
+                "bussinessType": 1,
+                "userId": self._third_party_user_id,
+                "requestType": 1,
+                "clientType": 1,
+            },
+        )
+        if not isinstance(response, list) or not response:
+            raise FotileConnectionError(0, f"Invalid MQTT route response: {response}")
+        broker = response[0]
+        if not isinstance(broker, dict) or not broker.get("ip"):
+            raise FotileConnectionError(0, f"Invalid MQTT broker: {broker}")
+        return broker
+
+    async def send_app_command(
+        self,
+        device_id: str,
+        command: dict[str, Any],
+    ) -> None:
+        """Publish one command through the App MQTT cloud channel."""
+        device = self._app_devices.get(str(device_id))
+        if device is None:
+            raise FotileApiError(404, f"Unknown App device: {device_id}")
+        if not self._third_party_user_id:
+            raise FotileAuthError(401, "Missing Fotile App user id")
+
+        broker = await self._get_app_broker()
+        token = await self._auth.async_get_access_token()
+        client = FotileMqtt(
+            f"{broker.get('clientId') or 'Fotile_APP'}_HA",
+            self._third_party_user_id,
+            token,
+        )
+        topic = f"control/{device['product_id']}/{device['device_id']}"
+        try:
+            await client.connect(
+                str(broker["ip"]),
+                int(broker.get("port", 1883)),
+                int(broker.get("keepalived", 30)),
+            )
+            await client.publish(topic, command)
+        except (ConnectionError, OSError, TimeoutError) as err:
+            raise FotileConnectionError(
+                0,
+                f"Fotile MQTT command failed: {err}",
+            ) from err
+        finally:
+            await client.disconnect()
+
+        _LOGGER.info(
+            "Sent Fotile App command for %s: %s",
+            device_id,
+            sorted(command),
+        )
+
+    async def set_dishwasher_power(self, device_id: str, on: bool) -> None:
+        await self.send_app_command(
+            device_id,
+            {"PowerSwitchAll": 1 if on else 0},
+        )
+
+    async def start_dishwasher(self, device_id: str, mode: int) -> None:
+        await self.send_app_command(
+            device_id,
+            {
+                "PowerSwitchAll": 1,
+                "WorkMode": mode,
+                "WorkState": 1,
+            },
+        )
+
+    async def resume_dishwasher(self, device_id: str) -> None:
+        await self.send_app_command(device_id, {"WorkState": 1})
+
+    async def pause_dishwasher(self, device_id: str) -> None:
+        await self.send_app_command(device_id, {"WorkState": 2})
+
+    async def stop_dishwasher(self, device_id: str) -> None:
+        await self.send_app_command(device_id, {"WorkState": 0})
 
     # ---- device subscription ----
 

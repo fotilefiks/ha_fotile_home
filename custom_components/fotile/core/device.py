@@ -1,10 +1,17 @@
 """Fotile device model abstraction."""
+
 from __future__ import annotations
 
 import time
 from typing import Any
 
-from ..const import DEVICE_KIND_BY_SID
+from ..const import (
+    DEVICE_KIND_BY_SID,
+    DEVICE_KIND_DISHWASHER,
+    DISHWASHER_MODEL_MARKERS,
+    DISHWASHER_PRODUCT_PREFIXES,
+    DISHWASHER_STATUS_KEYS,
+)
 
 
 class FotileDevice:
@@ -48,16 +55,39 @@ class FotileDevice:
         return sid in self.service_ids
 
     @property
+    def flat_status(self) -> dict[str, Any]:
+        """Raw snapshot attributes as ``{sid.attr: value}``."""
+        flat = self._status.get("_flat")
+        return flat if isinstance(flat, dict) else {}
+
+    @property
+    def is_dishwasher(self) -> bool:
+        """Best-effort dishwasher detection for the diagnostic integration."""
+        identity = " ".join((self.model, self.name, *self.service_ids)).upper()
+        if any(marker in identity for marker in DISHWASHER_MODEL_MARKERS):
+            return True
+        if self.product_id.upper().startswith(DISHWASHER_PRODUCT_PREFIXES):
+            return True
+
+        attrs = {
+            str(key).split(".", 1)[-1]
+            for key in self.flat_status
+            if not str(key).endswith(".__ts")
+        }
+        return bool(attrs & DISHWASHER_STATUS_KEYS)
+
+    @property
     def kinds(self) -> list[str]:
         """Device categories matched via services[].sid (not devType)."""
         declared = set(self.service_ids)
-        if not declared:
-            return []
-        return [
+        kinds = [
             kind
             for kind, feature_sids in DEVICE_KIND_BY_SID.items()
             if feature_sids & declared
         ]
+        if self.is_dishwasher and DEVICE_KIND_DISHWASHER not in kinds:
+            kinds.append(DEVICE_KIND_DISHWASHER)
+        return kinds
 
     @property
     def status(self) -> dict[str, Any]:

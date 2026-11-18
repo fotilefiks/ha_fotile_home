@@ -1,4 +1,5 @@
 """Constants for the Fotile integration."""
+
 from __future__ import annotations
 
 from typing import Any, Final
@@ -31,6 +32,23 @@ PKCE_CODE_VERIFIER_LENGTH: Final = 128
 #   /devices/{deviceId}/command
 #   /devices/{deviceId}/subscribe
 HA_API_BASE_URL: Final = "https://api.fotile.com/open-cloud/ha/v1"
+
+# The HA facade currently omits some appliance families (including V6A). The
+# OAuth token is also accepted by the 方太幸福家 App API, so use this documented
+# app protocol as a read-only fallback for devices missing from the facade.
+APP_API_BASE_URL: Final = "https://api.fotile.com"
+APP_DEVICES_PATH: Final = "/v3/all/homes/devices"
+APP_SHADOW_PATH: Final = "/v2/device/batchQueryShadow"
+APP_ROUTE_PATH: Final = "/iot-mqttManager/routeService"
+APP_API_HEADERS: Final[dict[str, str]] = {
+    "Content-Type": "application/json; charset=utf-8",
+    "Accept-Encoding": "gzip",
+    "X-Source": "android.4.4",
+    "X-ModelName": "SM-G9700",
+    "X-SoftwareVersion": "Android 9",
+    "X-AppVer": "android.3.3.08",
+    "User-Agent": "Dart/3.6 (dart:io)",
+}
 
 # Only the business codes the client branches on: the facade maps credential
 # errors to HTTP 401 and everything else to HTTP 4xx.
@@ -82,10 +100,70 @@ SID_RIGHT_STOVE: Final = "RightStoveState"
 # Category is decided by services[].sid; the spec has no devType table.
 DEVICE_KIND_RANGE_HOOD: Final = "range_hood"
 DEVICE_KIND_STOVE: Final = "stove"
+DEVICE_KIND_DISHWASHER: Final = "dishwasher"
 DEVICE_KIND_BY_SID: Final[dict[str, frozenset[str]]] = {
     DEVICE_KIND_RANGE_HOOD: frozenset({SID_POWER_SWITCH, SID_FAN_LEVEL, SID_LIGHT}),
     DEVICE_KIND_STOVE: frozenset({SID_LEFT_STOVE, SID_RIGHT_STOVE}),
 }
+
+# The cloud facade does not document dishwasher service identifiers yet. These
+# markers and raw status fields are shared by the dishwasher families for which
+# public protocol traces exist (1025A and 1032A). They are only used to select
+# read-only diagnostic entities.
+DISHWASHER_MODEL_MARKERS: Final[tuple[str, ...]] = (
+    "JBCD",
+    "DISH",
+    "WASHER",
+    "DISHWASHER",
+    "DISH_WASH",
+)
+DISHWASHER_PRODUCT_PREFIXES: Final[tuple[str, ...]] = ("1025", "1032")
+DISHWASHER_STATUS_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "PowerSwitchAll",
+        "WorkState",
+        "RunState",
+        "WorkMode",
+        "ClRemTime",
+        "SetWorkTime",
+        "StoreTotalTime",
+        "DoorLockSta",
+        "ErrorNum",
+        "Reminder",
+        "DetergentLevel",
+        "SoftensaltLevel",
+        "Turbidity",
+        "GSCWorkSta",
+        "GSCWorkMode",
+        "GSCClRemT",
+        "GSCErrorNum",
+        "AutoDrain",
+        "GSCAutoDrain",
+    }
+)
+
+DISHWASHER_1025_WORK_STATE_MAP: Final[dict[int, str]] = {
+    0: "待机",
+    1: "待机",
+    2: "运行中",
+    3: "运行中",
+    4: "运行中",
+    5: "已完成",
+    6: "已暂停",
+    7: "预约中",
+}
+DISHWASHER_1025_WORK_MODE_MAP: Final[dict[int, str]] = {
+    0: "智能洗",
+    1: "强力洗",
+    2: "标准洗",
+    3: "节能洗",
+    4: "快速洗",
+    5: "漂洗",
+    6: "消毒",
+    7: "烘干",
+    135: "预约",
+}
+DISHWASHER_SELECTABLE_WORK_MODES: Final[tuple[int, ...]] = (0, 1, 2, 3, 4)
 
 # FanLevel: 0-standby, 1-low, 2-auto, 3-high.
 FAN_LEVEL_STANDBY: Final = 0
@@ -112,5 +190,9 @@ else:
     PLATFORMS: Final[list[Platform]] = [
         Platform.FAN,
         Platform.LIGHT,
+        Platform.SWITCH,
+        Platform.SELECT,
+        Platform.BUTTON,
+        Platform.SENSOR,
         Platform.BINARY_SENSOR,
     ]

@@ -17,15 +17,14 @@ automation.
 |--------|-----------|----------|
 | Range hood | Fan / Light | Master power switch, 3 fan speeds (low / auto / high), light switch |
 | Stove | Binary Sensor ×2 | Left / right burner on-state (**read-only**) |
+| Dishwasher `JBCD7E-02-V6A` | Switch / Select / Button / Sensor | Power, five wash modes, start/resume, pause, cancel and status monitoring |
 
 > **About stoves**: the stove fields Fotile exposes to the cloud-cloud protocol
 > (`LeftStoveState` / `RightStoveState`) have read (`R`) permission only, so this
 > integration reports their state but **does not control the stove**.
 >
-> More categories (dishwasher, water heater, water purifier, sterilizer, etc.)
-> will be added once Fotile publishes their thing models. The removed dishwasher
-> and steamer-oven code is kept in git history to be restored when the models
-> become available.
+> Additional categories (water heater, water purifier, sterilizer, etc.) will be
+> added as their cloud models become available.
 
 ### How device types are identified
 
@@ -38,11 +37,46 @@ capability declarations returned by `DeviceDiscovery`; see
 |----------|---------------------------|
 | Range hood | `PowerSwitch` / `FanLevel` / `Light` |
 | Stove | `LeftStoveState` / `RightStoveState` |
+| Dishwasher | `JBCD*` model name or dishwasher-specific shadow fields |
 
 One device may match multiple categories (e.g. an integrated cooker-hood), in
 which case all matching platform entities are created. Each entity also
 double-checks that the device actually declares the corresponding sid, avoiding
 always-unavailable light entities for hoods without a light.
+
+### Dishwasher V6A cloud fallback
+
+The HA facade currently returns an empty device list for the dishwasher
+`JBCD7E-02-V6A`, even though the appliance is visible in the Fotile account.
+The integration therefore keeps the facade as the primary path and falls back to
+the 方太幸福家 App API only when the facade returns no devices.
+
+The fallback deliberately reuses the existing OAuth authorization:
+
+1. `GET /v3/all/homes/devices` discovers appliances omitted by the facade.
+2. `POST /v2/device/batchQueryShadow` reads their complete property shadow.
+3. `POST /iot-mqttManager/routeService` returns the App MQTT endpoint.
+4. Control commands are sent to `control/{productId}/{deviceId}`.
+
+Status entities are created from the fields actually returned by the device,
+so unknown future fields remain visible for diagnostics. The V6A implementation
+provides:
+
+- Online, power, work state, selected programme, remaining time, door lock,
+  error code, detergent/salt level and other cloud attributes.
+- Power switch.
+- Smart, intensive, standard, eco and quick wash mode selection.
+- Start/resume, pause and cancel controls.
+- A separate `*_HA` MQTT client id, avoiding takeover of the phone App session.
+
+The power command and status path have been tested on a real V6A. Wash-mode
+mapping follows the existing 1025-series dishwasher implementation; starting an
+actual wash should still be treated as an appliance operation and used with
+care.
+
+> The App API has no public stability or compatibility contract. If Fotile
+> changes these endpoints, the facade-backed devices will continue to work and
+> only the fallback path will be affected.
 
 ---
 
@@ -119,10 +153,11 @@ After installation, go to **Devices & Services → Fotile → Configure**:
 
 ## Cloud Protocol
 
-This integration **does not call Fotile's enterprise-side API directly**. It only
-talks to the Home Assistant facade (`/ha/v1`) provided by Fotile. CorpId, the
-cloud-cloud envelope (`header` / `namespace`) and the enterprise-side protocol
-are owned by the server; the client is unaware of them and carries no vendor id.
+This integration normally talks only to the Home Assistant facade (`/ha/v1`)
+provided by Fotile. CorpId, the cloud-cloud envelope (`header` / `namespace`) and
+the enterprise-side protocol are owned by the server. For appliance families
+that the facade does not yet return, such as V6A, the App API fallback uses the
+same OAuth access token with Fotile App request headers.
 
 ### Flat REST
 

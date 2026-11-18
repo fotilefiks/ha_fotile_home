@@ -1,4 +1,5 @@
 """Data update coordinator for Fotile devices."""
+
 from __future__ import annotations
 
 import asyncio
@@ -64,6 +65,7 @@ class FotileDataUpdateCoordinator(DataUpdateCoordinator[dict[str, FotileDevice]]
         self._status_stale_threshold: float = max(
             STATUS_STALE_THRESHOLD, scan_interval * 2
         )
+        self._selected_dishwasher_modes: dict[str, int] = {}
 
     @property
     def devices(self) -> dict[str, FotileDevice]:
@@ -100,6 +102,23 @@ class FotileDataUpdateCoordinator(DataUpdateCoordinator[dict[str, FotileDevice]]
         if device is None:
             return False
         return device.is_status_fresh(self._status_stale_threshold)
+
+    def selected_dishwasher_mode(self, device_id: str) -> int:
+        """Selected mode; follows cloud state until locally overridden."""
+        if device_id in self._selected_dishwasher_modes:
+            return self._selected_dishwasher_modes[device_id]
+        device = self._devices.get(device_id)
+        if device is None:
+            return 0
+        value = device.flat_status.get("AppState.WorkMode")
+        try:
+            mode = int(value)
+        except (TypeError, ValueError):
+            return 0
+        return mode if 0 <= mode <= 4 else 0
+
+    def set_selected_dishwasher_mode(self, device_id: str, mode: int) -> None:
+        self._selected_dishwasher_modes[device_id] = mode
 
     async def _async_get_device_list(self) -> list[dict[str, Any]]:
         now = time.time()
@@ -149,6 +168,13 @@ class FotileDataUpdateCoordinator(DataUpdateCoordinator[dict[str, FotileDevice]]
                         device_id,
                         device_info.get("device_type"),
                     )
+                    _LOGGER.debug(
+                        "Fotile device identity: id=%s model=%s product=%s services=%s",
+                        device_id,
+                        device_info.get("model"),
+                        device_info.get("product_id"),
+                        device_info.get("service_ids"),
+                    )
                 else:
                     self._devices[device_id].update_info(device_info)
 
@@ -170,10 +196,7 @@ class FotileDataUpdateCoordinator(DataUpdateCoordinator[dict[str, FotileDevice]]
             return
 
         results = await asyncio.gather(
-            *(
-                self.client.get_device_status(device_id)
-                for device_id in device_ids
-            ),
+            *(self.client.get_device_status(device_id) for device_id in device_ids),
             return_exceptions=True,
         )
 
@@ -202,3 +225,8 @@ class FotileDataUpdateCoordinator(DataUpdateCoordinator[dict[str, FotileDevice]]
                 continue
 
             device.update_status(result)
+            _LOGGER.debug(
+                "Fotile snapshot fields for %s: %s",
+                device_id,
+                result.get("_flat", {}),
+            )

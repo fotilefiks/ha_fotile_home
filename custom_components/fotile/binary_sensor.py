@@ -1,4 +1,5 @@
 """Stove burner state binary sensors (read-only)."""
+
 from __future__ import annotations
 
 import logging
@@ -12,7 +13,12 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DEVICE_KIND_STOVE, SID_LEFT_STOVE, SID_RIGHT_STOVE
+from .const import (
+    DEVICE_KIND_DISHWASHER,
+    DEVICE_KIND_STOVE,
+    SID_LEFT_STOVE,
+    SID_RIGHT_STOVE,
+)
 from .coordinator import FotileDataUpdateCoordinator
 from .core.mapping import to_bool
 from .entity import FotileEntity
@@ -33,8 +39,11 @@ async def async_setup_entry(
 ) -> None:
     coordinator: FotileDataUpdateCoordinator = entry.runtime_data
 
-    entities: list[FotileStoveBurnerSensor] = []
+    entities: list[BinarySensorEntity] = []
     for device in coordinator.selected_devices.values():
+        if DEVICE_KIND_DISHWASHER in device.kinds:
+            entities.append(FotileDishwasherOnlineSensor(coordinator, device))
+
         if DEVICE_KIND_STOVE not in device.kinds:
             continue
         for status_field, entity_key, sid in STOVE_BURNERS:
@@ -73,3 +82,21 @@ class FotileStoveBurnerSensor(FotileEntity, BinarySensorEntity):
         if value is None:
             return None
         return to_bool(value)
+
+
+class FotileDishwasherOnlineSensor(FotileEntity, BinarySensorEntity):
+    """Connectivity sensor that remains available while the dishwasher is offline."""
+
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+
+    def __init__(self, coordinator: FotileDataUpdateCoordinator, device: Any) -> None:
+        super().__init__(coordinator, device, "dishwasher_online")
+        self._attr_name = "在线"
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.last_update_success
+
+    @property
+    def is_on(self) -> bool:
+        return self._device.online

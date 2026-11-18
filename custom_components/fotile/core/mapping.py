@@ -1,4 +1,5 @@
 """Response parsing and field mapping (no aiohttp/HA deps)."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -20,12 +21,57 @@ __all__ = [
     "extract_device_list",
     "extract_service_ids",
     "flatten_service_data",
+    "map_app_device_fields",
+    "map_app_shadow",
     "map_device_fields",
     "map_status_fields",
     "to_bool",
     "to_float",
     "to_int",
 ]
+
+
+def map_app_device_fields(device: Any) -> dict[str, Any] | None:
+    """Map a 方太幸福家 App device-list object to internal device fields."""
+    if not isinstance(device, dict):
+        return None
+    device_id = device.get("id") or device.get("deviceId")
+    if device_id is None:
+        return None
+    return {
+        "device_id": str(device_id),
+        "name": device.get("name") or device.get("productName") or str(device_id),
+        "device_type": device.get("productName") or "",
+        "model": device.get("type") or "",
+        "manufacturer": "Fotile",
+        "product_id": str(device.get("product_id") or device.get("productId") or ""),
+        "serial_number": str(device.get("sn") or ""),
+        "service_ids": [],
+        "service_types": [],
+        "online": False,
+        "_raw": device,
+        "_source": "app",
+    }
+
+
+def map_app_shadow(shadow: Any) -> dict[str, Any]:
+    """Map an App batchQueryShadow object to online and flattened fields."""
+    result: dict[str, Any] = {"online": False, "_flat": {}}
+    if not isinstance(shadow, dict):
+        return result
+    result["online"] = to_bool(shadow.get("online"), default=False)
+    shadow_data = shadow.get("shadowData")
+    properties = (
+        shadow_data.get("propertyPairs") if isinstance(shadow_data, dict) else None
+    )
+    if not isinstance(properties, dict):
+        return result
+    result["_flat"] = {
+        f"AppState.{key}": value
+        for key, value in properties.items()
+        if isinstance(value, (str, int, float, bool))
+    }
+    return result
 
 
 def extract_device_list(payload: dict[str, Any]) -> list[Any]:
